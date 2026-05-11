@@ -44,6 +44,31 @@ typedef struct {
     RDBStatus status;
 } RDBGetResult;
 
+typedef enum {
+    RDB_SCAN_EXACT = 0,
+    RDB_SCAN_PREFIX = 1,
+    RDB_SCAN_RANGE = 2
+} RDBScanMode;
+
+typedef struct {
+    const char *column_family;
+    RDBScanMode mode;
+    const uint8_t *exact_key;
+    size_t exact_key_count;
+    const uint8_t *lower_bound;
+    size_t lower_bound_count;
+    const uint8_t *upper_bound;
+    size_t upper_bound_count;
+    const uint8_t *prefix;
+    size_t prefix_count;
+    size_t limit;
+    size_t preview_byte_limit;
+    bool reverse;
+} RDBScanConfig;
+
+typedef bool (*RDBCancelCallback)(void *context);
+typedef void (*RDBScanRowCallback)(const uint8_t *key, size_t key_count, const uint8_t *value, size_t value_count, size_t value_preview_count, uint64_t sequence_index, void *context);
+
 RDBStatus rdb_status_ok(void);
 void rdb_status_free(RDBStatus status);
 
@@ -58,6 +83,7 @@ const char *rdb_database_path(RDBDatabase *database);
 bool rdb_database_is_read_only(RDBDatabase *database);
 
 RDBGetResult rdb_get(RDBDatabase *database, const char *column_family, const uint8_t *key, size_t key_count);
+RDBStatus rdb_scan(RDBDatabase *database, RDBScanConfig config, RDBScanRowCallback callback, void *callback_context, RDBCancelCallback cancel_callback, void *cancel_context);
 RDBStatus rdb_put(RDBDatabase *database, const char *column_family, const uint8_t *key, size_t key_count, const uint8_t *value, size_t value_count);
 RDBStatus rdb_delete(RDBDatabase *database, const char *column_family, const uint8_t *key, size_t key_count);
 RDBStatus rdb_write_key_change(RDBDatabase *database, const char *column_family, const uint8_t *old_key, size_t old_key_count, const uint8_t *new_key, size_t new_key_count, const uint8_t *value, size_t value_count);

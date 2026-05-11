@@ -225,6 +225,113 @@ RDBGetResult rdb_get(RDBDatabase *database, const char *column_family, const uin
     return RDBGetResult{true, RDBOwnedBytes{bytes, value.size()}, rdb_status_ok()};
 }
 
+static bool rdb_slice_starts_with(const rocksdb::Slice &slice, const uint8_t *prefix, size_t prefix_count) {
+    if (prefix == nullptr || prefix_count == 0) {
+        return true;
+    }
+    return slice.size() >= prefix_count && std::memcmp(slice.data(), prefix, prefix_count) == 0;
+}
+
+static bool rdb_slice_less_than(const rocksdb::Slice &lhs, const uint8_t *rhs, size_t rhs_count) {
+    return lhs.compare(rocksdb::Slice(reinterpret_cast<const char *>(rhs), rhs_count)) < 0;
+}
+
+static bool rdb_slice_greater_or_equal(const rocksdb::Slice &lhs, const uint8_t *rhs, size_t rhs_count) {
+    return lhs.compare(rocksdb::Slice(reinterpret_cast<const char *>(rhs), rhs_count)) >= 0;
+}
+
+RDBStatus rdb_scan(RDBDatabase *database, RDBScanConfig config, RDBScanRowCallback callback, void *callback_context, RDBCancelCallback cancel_callback, void *cancel_context) {
+    if (database == nullptr) {
+        return RDBStatus{1, rdb_strdup("Database is not open.")};
+    }
+    if (callback == nullptr) {
+        return RDBStatus{1, rdb_strdup("Scan callback is missing.")};
+    }
+    rocksdb::ColumnFamilyHandle *handle = rdb_find_handle(database, config.column_family);
+    if (handle == nullptr) {
+        return RDBStatus{1, rdb_strdup("Column family not found.")};
+    }
+
+    if (config.mode == RDB_SCAN_EXACT) {
+        RDBGetResult get_result = rdb_get(database, config.column_family, config.exact_key, config.exact_key_count);
+        if (get_result.status.code != 0) {
+            return get_result.status;
+        }
+        if (get_result.found) {
+            size_t preview_count = std::min(get_result.value.count, config.preview_byte_limit);
+            callback(config.exact_key, config.exact_key_count, get_result.value.data, get_result.value.count, preview_count, 0, callback_context);
+            rdb_owned_bytes_free(get_result.value);
+        }
+        return rdb_status_ok();
+    }
+
+    rocksdb::ReadOptions read_options;
+    std::unique_ptr<rocksdb::Iterator> iterator(database->db->NewIterator(read_options, handle));
+    uint64_t emitted = 0;
+    size_t limit = config.limit == 0 ? 256 : config.limit;
+    size_t preview_limit = config.preview_byte_limit == 0 ? 4096 : config.preview_byte_limit;
+
+    if (config.reverse) {
+        if (config.upper_bound != nullptr && config.upper_bound_count > 0) {
+            iterator->SeekForPrev(rocksdb::Slice(reinterpret_cast<const char *>(config.upper_bound), config.upper_bound_count));
+        } else if (config.prefix != nullptr && config.prefix_count > 0) {
+            std::string seek_key(reinterpret_cast<const char *>(config.prefix), config.prefix_count);
+            seek_key.push_back(static_cast<char>(0xff));
+            iterator->SeekForPrev(rocksdb::Slice(seek_key));
+        } else {
+            iterator->SeekToLast();
+        }
+    } else if (config.mode == RDB_SCAN_PREFIX && config.prefix != nullptr) {
+        iterator->Seek(rocksdb::Slice(reinterpret_cast<const char *>(config.prefix), config.prefix_count));
+    } else if (config.lower_bound != nullptr && config.lower_bound_count > 0) {
+        iterator->Seek(rocksdb::Slice(reinterpret_cast<const char *>(config.lower_bound), config.lower_bound_count));
+    } else {
+        iterator->SeekToFirst();
+    }
+
+    while (iterator->Valid() && emitted < limit) {
+        if (cancel_callback != nullptr && cancel_callback(cancel_context)) {
+            break;
+        }
+
+        rocksdb::Slice key = iterator->key();
+        if (config.mode == RDB_SCAN_PREFIX && !rdb_slice_starts_with(key, config.prefix, config.prefix_count)) {
+            break;
+        }
+        if (!config.reverse && config.upper_bound != nullptr && config.upper_bound_count > 0 && rdb_slice_greater_or_equal(key, config.upper_bound, config.upper_bound_count)) {
+            break;
+        }
+        if (config.reverse && config.upper_bound != nullptr && config.upper_bound_count > 0 && rdb_slice_greater_or_equal(key, config.upper_bound, config.upper_bound_count)) {
+            iterator->Prev();
+            continue;
+        }
+        if (config.reverse && config.lower_bound != nullptr && config.lower_bound_count > 0 && rdb_slice_less_than(key, config.lower_bound, config.lower_bound_count)) {
+            break;
+        }
+
+        rocksdb::Slice value = iterator->value();
+        size_t preview_count = std::min(value.size(), preview_limit);
+        callback(
+            reinterpret_cast<const uint8_t *>(key.data()),
+            key.size(),
+            reinterpret_cast<const uint8_t *>(value.data()),
+            value.size(),
+            preview_count,
+            emitted,
+            callback_context
+        );
+        ++emitted;
+
+        if (config.reverse) {
+            iterator->Prev();
+        } else {
+            iterator->Next();
+        }
+    }
+
+    return rdb_status_from(iterator->status());
+}
+
 RDBStatus rdb_put(RDBDatabase *database, const char *column_family, const uint8_t *key, size_t key_count, const uint8_t *value, size_t value_count) {
     if (database == nullptr) {
         return RDBStatus{1, rdb_strdup("Database is not open.")};

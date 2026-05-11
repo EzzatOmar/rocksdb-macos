@@ -57,6 +57,35 @@ actor DatabaseSession {
         return try RocksBridge.get(database: handle, columnFamily: columnFamily, key: key)
     }
 
+    func scanRows(_ request: ScanRequest, isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> [KeyValueRow] {
+        guard let handle else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+        return try RocksBridge.scan(database: handle, request: request, isCancelled: isCancelled)
+    }
+
+    nonisolated func scan(_ request: ScanRequest, batchSize: Int = 256) -> AsyncThrowingStream<[KeyValueRow], Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let rows = try await scanRows(request, isCancelled: { Task.isCancelled })
+                    var index = rows.startIndex
+                    while index < rows.endIndex {
+                        let end = rows.index(index, offsetBy: batchSize, limitedBy: rows.endIndex) ?? rows.endIndex
+                        continuation.yield(Array(rows[index..<end]))
+                        index = end
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
     func put(columnFamily: String, key: Data, value: Data) throws {
         guard let handle, metadata?.openMode == .readWrite else {
             throw RocksBridgeError(code: 1, message: "Database is open read-only.")

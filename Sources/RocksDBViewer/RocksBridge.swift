@@ -83,6 +83,24 @@ enum RocksBridge {
         return Data(bytes: result.value.data, count: result.value.count)
     }
 
+    static func scan(database: RocksDatabaseHandle, request: ScanRequest, isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> [KeyValueRow] {
+        guard let pointer = database.pointer else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+
+        let collector = ScanCollector(columnFamily: request.columnFamily, displayMode: .utf8)
+        let cancelBox = CancelBox(isCancelled: isCancelled)
+        let collectorPointer = Unmanaged.passUnretained(collector).toOpaque()
+        let cancelPointer = Unmanaged.passUnretained(cancelBox).toOpaque()
+
+        let status = request.withRDBScanConfig { config in
+            rdb_scan(pointer, config, scanRowCallback, collectorPointer, scanCancelCallback, cancelPointer)
+        }
+        defer { rdb_status_free(status) }
+        try throwIfNeeded(status)
+        return collector.rows
+    }
+
     static func put(database: RocksDatabaseHandle, columnFamily: String, key: Data, value: Data) throws {
         try writeStatus(database: database, columnFamily: columnFamily) { pointer, cfPointer in
             key.withUnsafeBytes { keyBytes in
@@ -143,6 +161,114 @@ enum RocksBridge {
         guard let values = array.values else { return [] }
         return (0..<array.count).compactMap { index in
             values[index].map { String(cString: $0) }
+        }
+    }
+}
+
+private final class ScanCollector {
+    let columnFamily: String
+    let displayMode: ValueDisplayMode
+    var rows: [KeyValueRow] = []
+
+    init(columnFamily: String, displayMode: ValueDisplayMode) {
+        self.columnFamily = columnFamily
+        self.displayMode = displayMode
+    }
+}
+
+private final class CancelBox {
+    let isCancelled: @Sendable () -> Bool
+
+    init(isCancelled: @escaping @Sendable () -> Bool) {
+        self.isCancelled = isCancelled
+    }
+}
+
+private let scanCancelCallback: RDBCancelCallback = { context in
+    guard let context else { return false }
+    return Unmanaged<CancelBox>.fromOpaque(context).takeUnretainedValue().isCancelled()
+}
+
+private let scanRowCallback: RDBScanRowCallback = { keyPointer, keyCount, valuePointer, valueCount, valuePreviewCount, sequenceIndex, context in
+    guard let context, let keyPointer else { return }
+    let collector = Unmanaged<ScanCollector>.fromOpaque(context).takeUnretainedValue()
+    let keyData = Data(bytes: keyPointer, count: keyCount)
+    let valueData: Data
+    if let valuePointer, valuePreviewCount > 0 {
+        valueData = Data(bytes: valuePointer, count: valuePreviewCount)
+    } else {
+        valueData = Data()
+    }
+    let row = KeyValueRow(
+        id: StableRowID(columnFamily: collector.columnFamily, sequenceIndex: sequenceIndex, keyDigest: stableDigest(keyData)),
+        keyPreview: BytePreview(bytes: keyData, totalSize: keyCount, preferredDisplay: .utf8, limit: BytePreview.defaultLimit),
+        valuePreview: BytePreview(bytes: valueData, totalSize: valueCount, preferredDisplay: collector.displayMode, limit: BytePreview.defaultLimit),
+        keySize: keyCount,
+        valueSize: valueCount,
+        sequenceIndex: sequenceIndex,
+        source: .live
+    )
+    collector.rows.append(row)
+}
+
+private func stableDigest(_ data: Data) -> UInt64 {
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    for byte in data {
+        hash ^= UInt64(byte)
+        hash &*= 1_099_511_628_211
+    }
+    return hash
+}
+
+private extension ScanRequest {
+    func withRDBScanConfig<Result>(_ body: (RDBScanConfig) -> Result) -> Result {
+        let exact = mode == .exact ? lowerBound : nil
+        return columnFamily.withCString { cfPointer in
+            exact.withOptionalUnsafeBytes { exactPointer, exactCount in
+                lowerBound.withOptionalUnsafeBytes { lowerPointer, lowerCount in
+                    upperBound.withOptionalUnsafeBytes { upperPointer, upperCount in
+                        prefix.withOptionalUnsafeBytes { prefixPointer, prefixCount in
+                            let config = RDBScanConfig(
+                                column_family: cfPointer,
+                                mode: rdbMode,
+                                exact_key: exactPointer,
+                                exact_key_count: exactCount,
+                                lower_bound: lowerPointer,
+                                lower_bound_count: lowerCount,
+                                upper_bound: upperPointer,
+                                upper_bound_count: upperCount,
+                                prefix: prefixPointer,
+                                prefix_count: prefixCount,
+                                limit: limit,
+                                preview_byte_limit: previewByteLimit,
+                                reverse: direction == .reverse
+                            )
+                            return body(config)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    var rdbMode: RDBScanMode {
+        switch mode {
+        case .exact: RDB_SCAN_EXACT
+        case .prefix: RDB_SCAN_PREFIX
+        case .range: RDB_SCAN_RANGE
+        }
+    }
+}
+
+private extension Optional where Wrapped == Data {
+    func withOptionalUnsafeBytes<Result>(_ body: (UnsafePointer<UInt8>?, Int) -> Result) -> Result {
+        switch self {
+        case .some(let data):
+            return data.withUnsafeBytes { buffer in
+                body(buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count)
+            }
+        case .none:
+            return body(nil, 0)
         }
     }
 }
