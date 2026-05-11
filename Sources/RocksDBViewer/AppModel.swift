@@ -228,6 +228,84 @@ final class AppModel: ObservableObject {
         recentDatabases.removeAll()
         historyStore.clear()
     }
+
+    func saveKeyValue(mode: EditSheetMode, keyText: String, valueText: String, encoding: ValueDisplayMode) async -> String? {
+        guard canWrite else {
+            return "Database is open read-only."
+        }
+        do {
+            let newKey = try Self.decode(keyText, encoding: encoding)
+            let value = try Self.decode(valueText, encoding: encoding)
+            guard !newKey.isEmpty else {
+                return "Key cannot be empty."
+            }
+
+            switch mode {
+            case .add:
+                if try await session.get(columnFamily: selectedColumnFamily, key: newKey) != nil {
+                    return "Key already exists."
+                }
+                try await session.put(columnFamily: selectedColumnFamily, key: newKey, value: value)
+            case .edit:
+                guard let selectedRow else {
+                    return "No row is selected."
+                }
+                guard !selectedRow.keyPreview.isTruncated else {
+                    return "Cannot edit a row whose key preview is truncated. Load the full key first."
+                }
+                let oldKey = selectedRow.keyPreview.bytes
+                if oldKey == newKey {
+                    try await session.put(columnFamily: selectedColumnFamily, key: newKey, value: value)
+                } else {
+                    if try await session.get(columnFamily: selectedColumnFamily, key: newKey) != nil {
+                        return "New key already exists."
+                    }
+                    try await session.writeKeyChange(columnFamily: selectedColumnFamily, oldKey: oldKey, newKey: newKey, value: value)
+                }
+            }
+            await MainActor.run {
+                refreshCurrentScan()
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func deleteSelectedKey() async -> String? {
+        guard canWrite else {
+            return "Database is open read-only."
+        }
+        guard let selectedRow else {
+            return "No row is selected."
+        }
+        guard !selectedRow.keyPreview.isTruncated else {
+            return "Cannot delete a row whose key preview is truncated."
+        }
+        do {
+            try await session.delete(columnFamily: selectedColumnFamily, key: selectedRow.keyPreview.bytes)
+            await MainActor.run {
+                rows.removeAll { $0.id == selectedRow.id }
+                selectedRowID = nil
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    nonisolated static func decode(_ text: String, encoding: ValueDisplayMode) throws -> Data {
+        switch encoding {
+        case .utf8, .raw:
+            return Data(text.utf8)
+        case .json:
+            let data = Data(text.utf8)
+            _ = try JSONSerialization.jsonObject(with: data)
+            return data
+        case .hex:
+            return try HexCodec.decode(text)
+        }
+    }
 }
 
 enum HexCodec {

@@ -271,6 +271,16 @@ struct EditKeyValueSheet: View {
     @State private var selectedEncoding: ValueDisplayMode = .utf8
     @State private var keyText = ""
     @State private var valueText = ""
+    @State private var initialKeyText = ""
+    @State private var initialValueText = ""
+    @State private var validationMessage = ""
+    @State private var showDeleteConfirmation = false
+    @State private var showDiscardConfirmation = false
+    @State private var isSaving = false
+
+    private var hasChanges: Bool {
+        keyText != initialKeyText || valueText != initialValueText
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -297,26 +307,93 @@ struct EditKeyValueSheet: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
+            if !validationMessage.isEmpty {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
             HStack {
                 Button("Cancel") {
-                    dismiss()
+                    if hasChanges {
+                        showDiscardConfirmation = true
+                    } else {
+                        dismiss()
+                    }
                 }
                 Spacer()
-                Button("Delete", role: .destructive) {}
+                Button("Delete", role: .destructive) {
+                    showDeleteConfirmation = true
+                }
                     .disabled(mode == .add || !model.canWrite)
-                Button("Save") {
-                    dismiss()
+                Button {
+                    save()
+                } label: {
+                    if isSaving {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Save")
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!model.canWrite || keyText.isEmpty)
+                .disabled(!model.canWrite || keyText.isEmpty || isSaving)
             }
         }
         .padding(20)
         .frame(width: 620)
+        .confirmationDialog("Delete key?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                delete()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Delete cannot be undone unless a backup exists.")
+        }
+        .confirmationDialog("Discard changes?", isPresented: $showDiscardConfirmation, titleVisibility: .visible) {
+            Button("Discard", role: .destructive) {
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .onAppear {
             if case .edit = mode, let row = model.selectedRow {
                 keyText = row.keyPreview.text
                 valueText = row.valuePreview.text
+            }
+            initialKeyText = keyText
+            initialValueText = valueText
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        validationMessage = ""
+        Task {
+            let message = await model.saveKeyValue(mode: mode, keyText: keyText, valueText: valueText, encoding: selectedEncoding)
+            await MainActor.run {
+                isSaving = false
+                if let message {
+                    validationMessage = message
+                } else {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private func delete() {
+        isSaving = true
+        validationMessage = ""
+        Task {
+            let message = await model.deleteSelectedKey()
+            await MainActor.run {
+                isSaving = false
+                if let message {
+                    validationMessage = message
+                } else {
+                    dismiss()
+                }
             }
         }
     }

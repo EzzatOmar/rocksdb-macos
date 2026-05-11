@@ -18,4 +18,15 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(ids.contains("builtin.bytewise"))
         XCTAssertTrue(ComparatorProfile.builtIns.allSatisfy { !$0.comparatorIdentifier.isEmpty })
     }
+
+    func testHexCodecRejectsInvalidInput() {
+        XCTAssertThrowsError(try HexCodec.decode("abc"))
+        XCTAssertThrowsError(try HexCodec.decode("zz"))
+        XCTAssertEqual(try HexCodec.decode("68 69"), Data("hi".utf8))
+    }
+
+    func testJSONEncodingValidatesInput() {
+        XCTAssertNoThrow(try AppModel.decode(#"{"ok":true}"#, encoding: .json))
+        XCTAssertThrowsError(try AppModel.decode("{", encoding: .json))
+    }
 }
