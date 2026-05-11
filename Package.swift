@@ -8,7 +8,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "RocksDBViewer", targets: ["RocksDBViewer"])
+        .executable(name: "RocksDBViewer", targets: ["RocksDBViewer"]),
+        .executable(name: "rocksdb-viewer-bench", targets: ["RocksDBViewerBench"])
     ],
     targets: [
         .target(
@@ -28,6 +29,11 @@ let package = Package(
             name: "RocksDBViewer",
             dependencies: ["CRocksBridge"],
             path: "Sources/RocksDBViewer"
+        ),
+        .executableTarget(
+            name: "RocksDBViewerBench",
+            dependencies: ["CRocksBridge"],
+            path: "Sources/RocksDBViewerBench"
         ),
         .testTarget(
             name: "RocksDBViewerTests",

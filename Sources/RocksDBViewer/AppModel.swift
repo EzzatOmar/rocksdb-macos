@@ -19,6 +19,8 @@ final class AppModel: ObservableObject {
     @Published var snapshots: [SnapshotRecord] = []
     @Published var backups: [BackupRecord] = []
     @Published var operations: [OperationRecord] = []
+    @Published var selectedSnapshotID: UUID?
+    @Published var backupDirectory: String = ""
     @Published var openDatabaseSheetPresented = false
     @Published var editSheetMode: EditSheetMode?
     @Published var activeDatabasePath: String?
@@ -104,7 +106,82 @@ final class AppModel: ObservableObject {
     }
 
     func startBackup() {
-        appendOperation(name: "Backup", detail: "Backup service pending bridge integration", progress: 0, cancellable: true)
+        guard !backupDirectory.isEmpty else {
+            appendOperation(name: "Backup", detail: "Choose a backup directory first", progress: 1, cancellable: false)
+            return
+        }
+        let operationID = appendOperation(name: "Backup", detail: "Creating backup", progress: nil, cancellable: true)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let backupID = try await session.createBackup(backupDirectory: backupDirectory)
+                await MainActor.run {
+                    self.backups.insert(BackupRecord(id: Int(backupID), location: self.backupDirectory, createdAt: .now, sizeDescription: "Managed by RocksDB", status: "Complete"), at: 0)
+                    self.updateOperation(operationID, detail: "Backup \(backupID) complete", progress: 1)
+                }
+            } catch {
+                await MainActor.run {
+                    self.updateOperation(operationID, detail: error.localizedDescription, progress: 1)
+                }
+            }
+        }
+    }
+
+    func restoreLatestBackup(to destinationDirectory: String) {
+        guard !backupDirectory.isEmpty else {
+            appendOperation(name: "Restore", detail: "Choose a backup directory first", progress: 1, cancellable: false)
+            return
+        }
+        let operationID = appendOperation(name: "Restore", detail: "Restoring latest backup", progress: nil, cancellable: true)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await session.restoreLatestBackup(backupDirectory: backupDirectory, destinationDirectory: destinationDirectory)
+                await MainActor.run {
+                    self.updateOperation(operationID, detail: "Restore complete", progress: 1)
+                }
+            } catch {
+                await MainActor.run {
+                    self.updateOperation(operationID, detail: error.localizedDescription, progress: 1)
+                }
+            }
+        }
+    }
+
+    func createSnapshot() {
+        guard activeDatabasePath != nil else {
+            appendOperation(name: "Snapshot", detail: "Open a database before creating a snapshot", progress: 1, cancellable: false)
+            return
+        }
+        let id = UUID()
+        let name = "Snapshot \(snapshots.count + 1)"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await session.createSnapshot(id: id)
+                await MainActor.run {
+                    self.snapshots.append(SnapshotRecord(id: id, name: name, createdAt: .now, activeQueryCount: 0))
+                    self.selectedSnapshotID = id
+                }
+            } catch {
+                await MainActor.run {
+                    _ = self.appendOperation(name: "Snapshot", detail: error.localizedDescription, progress: 1, cancellable: false)
+                }
+            }
+        }
+    }
+
+    func releaseSnapshot(_ id: UUID) {
+        Task { [weak self] in
+            guard let self else { return }
+            await session.releaseSnapshot(id: id)
+            await MainActor.run {
+                self.snapshots.removeAll { $0.id == id }
+                if self.selectedSnapshotID == id {
+                    self.selectedSnapshotID = nil
+                }
+            }
+        }
     }
 
     func validateComparator() {
@@ -207,7 +284,7 @@ final class AppModel: ObservableObject {
             prefix: scanMode == .prefix ? prefixData : nil,
             limit: scanLimit,
             direction: scanDirection,
-            snapshotID: nil,
+            snapshotID: selectedSnapshotID,
             previewByteLimit: BytePreview.defaultLimit
         )
     }
@@ -344,7 +421,7 @@ extension KeyValueRow {
         let key = "sample:key:\(String(format: "%04d", index))"
         let value = #"{"kind":"preview","index":\#(index),"status":"bridge pending"}"#
         return KeyValueRow(
-            id: StableRowID(columnFamily: "default", sequenceIndex: UInt64(index), keyDigest: UInt64(index.hashValue)),
+            id: StableRowID(columnFamily: "default", sequenceIndex: UInt64(index), keyDigest: UInt64(bitPattern: Int64(index.hashValue))),
             keyPreview: BytePreview(bytes: Data(key.utf8), totalSize: key.utf8.count),
             valuePreview: BytePreview(bytes: Data(value.utf8), totalSize: value.utf8.count, preferredDisplay: .json),
             keySize: key.utf8.count,

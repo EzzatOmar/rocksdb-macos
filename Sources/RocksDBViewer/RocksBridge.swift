@@ -27,6 +27,27 @@ final class RocksDatabaseHandle: @unchecked Sendable {
     }
 }
 
+final class RocksSnapshotHandle: @unchecked Sendable {
+    fileprivate var pointer: OpaquePointer?
+    let bridgeID: UInt64
+
+    fileprivate init(pointer: OpaquePointer, bridgeID: UInt64) {
+        self.pointer = pointer
+        self.bridgeID = bridgeID
+    }
+
+    deinit {
+        release()
+    }
+
+    func release() {
+        if let pointer {
+            rdb_release_snapshot(pointer)
+            self.pointer = nil
+        }
+    }
+}
+
 enum RocksBridge {
     static func listColumnFamilies(path: String) throws -> [String] {
         var status = rdb_status_ok()
@@ -65,6 +86,19 @@ enum RocksBridge {
         return strings(from: array)
     }
 
+    static func createSnapshot(database: RocksDatabaseHandle) throws -> RocksSnapshotHandle {
+        guard let pointer = database.pointer else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+        let result = rdb_create_snapshot(pointer)
+        defer { rdb_status_free(result.status) }
+        try throwIfNeeded(result.status)
+        guard let snapshot = result.snapshot else {
+            throw RocksBridgeError(code: 1, message: "RocksDB did not return a snapshot handle.")
+        }
+        return RocksSnapshotHandle(pointer: snapshot, bridgeID: result.snapshot_id)
+    }
+
     static func get(database: RocksDatabaseHandle, columnFamily: String, key: Data) throws -> Data? {
         guard let pointer = database.pointer else {
             throw RocksBridgeError(code: 1, message: "Database is not open.")
@@ -83,7 +117,7 @@ enum RocksBridge {
         return Data(bytes: result.value.data, count: result.value.count)
     }
 
-    static func scan(database: RocksDatabaseHandle, request: ScanRequest, isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> [KeyValueRow] {
+    static func scan(database: RocksDatabaseHandle, snapshot: RocksSnapshotHandle?, request: ScanRequest, isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> [KeyValueRow] {
         guard let pointer = database.pointer else {
             throw RocksBridgeError(code: 1, message: "Database is not open.")
         }
@@ -94,7 +128,9 @@ enum RocksBridge {
         let cancelPointer = Unmanaged.passUnretained(cancelBox).toOpaque()
 
         let status = request.withRDBScanConfig { config in
-            rdb_scan(pointer, config, scanRowCallback, collectorPointer, scanCancelCallback, cancelPointer)
+            var config = config
+            config.snapshot = snapshot?.pointer
+            return rdb_scan(pointer, config, scanRowCallback, collectorPointer, scanCancelCallback, cancelPointer)
         }
         defer { rdb_status_free(status) }
         try throwIfNeeded(status)
@@ -138,6 +174,29 @@ enum RocksBridge {
                 }
             }
         }
+    }
+
+    static func createBackup(database: RocksDatabaseHandle, backupDirectory: String) throws -> UInt32 {
+        guard let pointer = database.pointer else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+        var backupID: UInt32 = 0
+        let status = backupDirectory.withCString { backupPointer in
+            rdb_create_backup(pointer, backupPointer, &backupID)
+        }
+        defer { rdb_status_free(status) }
+        try throwIfNeeded(status)
+        return backupID
+    }
+
+    static func restoreLatestBackup(backupDirectory: String, destinationDirectory: String) throws {
+        let status = backupDirectory.withCString { backupPointer in
+            destinationDirectory.withCString { destinationPointer in
+                rdb_restore_latest_backup(backupPointer, destinationPointer)
+            }
+        }
+        defer { rdb_status_free(status) }
+        try throwIfNeeded(status)
     }
 
     private static func writeStatus(database: RocksDatabaseHandle, columnFamily: String, body: (OpaquePointer, UnsafePointer<CChar>?) -> RDBStatus) throws {
@@ -241,7 +300,8 @@ private extension ScanRequest {
                                 prefix_count: prefixCount,
                                 limit: limit,
                                 preview_byte_limit: previewByteLimit,
-                                reverse: direction == .reverse
+                                reverse: direction == .reverse,
+                                snapshot: nil
                             )
                             return body(config)
                         }

@@ -4,6 +4,7 @@
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/write_batch.h>
+#include <rocksdb/utilities/backup_engine.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -21,6 +22,14 @@ struct RDBDatabase {
     bool read_only = true;
 };
 
+struct RDBSnapshot {
+    RDBDatabase *database;
+    const rocksdb::Snapshot *snapshot;
+    uint64_t snapshot_id;
+};
+
+static uint64_t g_snapshot_id = 1;
+
 static char *rdb_strdup(const std::string &value) {
     char *copy = static_cast<char *>(std::malloc(value.size() + 1));
     if (copy == nullptr) {
@@ -31,6 +40,13 @@ static char *rdb_strdup(const std::string &value) {
 }
 
 static RDBStatus rdb_status_from(const rocksdb::Status &status) {
+    if (status.ok()) {
+        return rdb_status_ok();
+    }
+    return RDBStatus{static_cast<int32_t>(status.code()), rdb_strdup(status.ToString())};
+}
+
+static RDBStatus rdb_status_from_io(const rocksdb::IOStatus &status) {
     if (status.ok()) {
         return rdb_status_ok();
     }
@@ -197,6 +213,31 @@ bool rdb_database_is_read_only(RDBDatabase *database) {
     return database == nullptr || database->read_only;
 }
 
+RDBSnapshotResult rdb_create_snapshot(RDBDatabase *database) {
+    if (database == nullptr) {
+        return RDBSnapshotResult{nullptr, 0, RDBStatus{1, rdb_strdup("Database is not open.")}};
+    }
+    const rocksdb::Snapshot *rocks_snapshot = database->db->GetSnapshot();
+    if (rocks_snapshot == nullptr) {
+        return RDBSnapshotResult{nullptr, 0, RDBStatus{1, rdb_strdup("RocksDB did not return a snapshot.")}};
+    }
+    auto snapshot = std::make_unique<RDBSnapshot>();
+    snapshot->database = database;
+    snapshot->snapshot = rocks_snapshot;
+    snapshot->snapshot_id = g_snapshot_id++;
+    return RDBSnapshotResult{snapshot.release(), g_snapshot_id - 1, rdb_status_ok()};
+}
+
+void rdb_release_snapshot(RDBSnapshot *snapshot) {
+    if (snapshot == nullptr) {
+        return;
+    }
+    if (snapshot->database != nullptr && snapshot->snapshot != nullptr) {
+        snapshot->database->db->ReleaseSnapshot(snapshot->snapshot);
+    }
+    delete snapshot;
+}
+
 RDBGetResult rdb_get(RDBDatabase *database, const char *column_family, const uint8_t *key, size_t key_count) {
     if (database == nullptr) {
         return RDBGetResult{false, RDBOwnedBytes{nullptr, 0}, RDBStatus{1, rdb_strdup("Database is not open.")}};
@@ -266,6 +307,9 @@ RDBStatus rdb_scan(RDBDatabase *database, RDBScanConfig config, RDBScanRowCallba
     }
 
     rocksdb::ReadOptions read_options;
+    if (config.snapshot != nullptr) {
+        read_options.snapshot = config.snapshot->snapshot;
+    }
     std::unique_ptr<rocksdb::Iterator> iterator(database->db->NewIterator(read_options, handle));
     uint64_t emitted = 0;
     size_t limit = config.limit == 0 ? 256 : config.limit;
@@ -385,4 +429,50 @@ RDBStatus rdb_write_key_change(RDBDatabase *database, const char *column_family,
 
 void rdb_owned_bytes_free(RDBOwnedBytes bytes) {
     std::free(bytes.data);
+}
+
+RDBStatus rdb_create_backup(RDBDatabase *database, const char *backup_dir, uint32_t *backup_id) {
+    if (database == nullptr) {
+        return RDBStatus{1, rdb_strdup("Database is not open.")};
+    }
+    if (backup_dir == nullptr || std::strlen(backup_dir) == 0) {
+        return RDBStatus{1, rdb_strdup("Backup directory is empty.")};
+    }
+    rocksdb::BackupEngineOptions options(backup_dir);
+    rocksdb::BackupEngine *engine = nullptr;
+    rocksdb::IOStatus open_status = rocksdb::BackupEngine::Open(options, rocksdb::Env::Default(), &engine);
+    if (!open_status.ok()) {
+        return rdb_status_from_io(open_status);
+    }
+    std::unique_ptr<rocksdb::BackupEngine> engine_owner(engine);
+    rocksdb::BackupID new_backup_id = 0;
+    rocksdb::CreateBackupOptions create_options;
+    create_options.flush_before_backup = true;
+    rocksdb::IOStatus backup_status = engine_owner->CreateNewBackup(create_options, database->db.get(), &new_backup_id);
+    if (!backup_status.ok()) {
+        return rdb_status_from_io(backup_status);
+    }
+    if (backup_id != nullptr) {
+        *backup_id = new_backup_id;
+    }
+    return rdb_status_ok();
+}
+
+RDBStatus rdb_restore_latest_backup(const char *backup_dir, const char *destination_dir) {
+    if (backup_dir == nullptr || std::strlen(backup_dir) == 0) {
+        return RDBStatus{1, rdb_strdup("Backup directory is empty.")};
+    }
+    if (destination_dir == nullptr || std::strlen(destination_dir) == 0) {
+        return RDBStatus{1, rdb_strdup("Destination directory is empty.")};
+    }
+    rocksdb::BackupEngineReadOnly *engine = nullptr;
+    rocksdb::BackupEngineOptions options(backup_dir);
+    rocksdb::IOStatus open_status = rocksdb::BackupEngineReadOnly::Open(options, rocksdb::Env::Default(), &engine);
+    if (!open_status.ok()) {
+        return rdb_status_from_io(open_status);
+    }
+    std::unique_ptr<rocksdb::BackupEngineReadOnly> engine_owner(engine);
+    rocksdb::RestoreOptions restore_options;
+    rocksdb::IOStatus restore_status = engine_owner->RestoreDBFromLatestBackup(restore_options, destination_dir, destination_dir);
+    return rdb_status_from_io(restore_status);
 }

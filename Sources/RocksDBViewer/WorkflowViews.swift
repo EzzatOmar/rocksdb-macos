@@ -58,6 +58,8 @@ struct SearchView: View {
 
 struct SnapshotsBackupsView: View {
     @ObservedObject var model: AppModel
+    @State private var restoreDestination = ""
+    @State private var showRestoreConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,20 +68,44 @@ struct SnapshotsBackupsView: View {
             HSplitView {
                 List {
                     Section("Snapshots") {
-                        ForEach(model.snapshots) { snapshot in
-                            LabeledContent(snapshot.name, value: snapshot.createdAt.formatted(date: .abbreviated, time: .shortened))
-                        }
-
                         Button {
-                            model.snapshots.append(SnapshotRecord(id: UUID(), name: "Snapshot \(model.snapshots.count + 1)", createdAt: .now, activeQueryCount: 0))
+                            model.createSnapshot()
                         } label: {
                             Label("Create Snapshot", systemImage: "camera")
+                        }
+
+                        ForEach(model.snapshots) { snapshot in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(snapshot.name)
+                                    Text(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    model.releaseSnapshot(snapshot.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Release \(snapshot.name)")
+                            }
                         }
                     }
                 }
 
                 List {
                     Section("Backups") {
+                        HStack {
+                            TextField("Backup directory", text: $model.backupDirectory)
+                            Button("Choose...") {
+                                if let path = chooseDirectory(canCreate: true) {
+                                    model.backupDirectory = path
+                                }
+                            }
+                        }
+
                         ForEach(model.backups) { backup in
                             VStack(alignment: .leading) {
                                 Text("Backup \(backup.id)")
@@ -95,14 +121,36 @@ struct SnapshotsBackupsView: View {
                             Label("Backup Now", systemImage: "archivebox")
                         }
 
-                        Button(role: .destructive) {} label: {
+                        Button(role: .destructive) {
+                            if let path = chooseDirectory(canCreate: true) {
+                                restoreDestination = path
+                                showRestoreConfirmation = true
+                            }
+                        } label: {
                             Label("Restore...", systemImage: "arrow.counterclockwise")
                         }
-                        .disabled(true)
+                        .disabled(model.backupDirectory.isEmpty)
                     }
                 }
             }
         }
+        .confirmationDialog("Restore latest backup?", isPresented: $showRestoreConfirmation, titleVisibility: .visible) {
+            Button("Restore", role: .destructive) {
+                model.restoreLatestBackup(to: restoreDestination)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Destination contents may be overwritten. Restore over the currently open database is blocked.")
+        }
+    }
+
+    private func chooseDirectory(canCreate: Bool) -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = canCreate
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url?.path : nil
     }
 }
 

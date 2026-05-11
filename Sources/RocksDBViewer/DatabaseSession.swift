@@ -17,6 +17,7 @@ struct DatabaseMetadata: Sendable, Equatable {
 actor DatabaseSession {
     private var handle: RocksDatabaseHandle?
     private var metadata: DatabaseMetadata?
+    private var snapshots: [UUID: RocksSnapshotHandle] = [:]
 
     var currentMetadata: DatabaseMetadata? {
         metadata
@@ -45,6 +46,10 @@ actor DatabaseSession {
     }
 
     func close() {
+        for snapshot in snapshots.values {
+            snapshot.release()
+        }
+        snapshots.removeAll()
         handle?.close()
         handle = nil
         metadata = nil
@@ -61,7 +66,8 @@ actor DatabaseSession {
         guard let handle else {
             throw RocksBridgeError(code: 1, message: "Database is not open.")
         }
-        return try RocksBridge.scan(database: handle, request: request, isCancelled: isCancelled)
+        let snapshot = request.snapshotID.flatMap { snapshots[$0] }
+        return try RocksBridge.scan(database: handle, snapshot: snapshot, request: request, isCancelled: isCancelled)
     }
 
     nonisolated func scan(_ request: ScanRequest, batchSize: Int = 256) -> AsyncThrowingStream<[KeyValueRow], Error> {
@@ -105,5 +111,31 @@ actor DatabaseSession {
             throw RocksBridgeError(code: 1, message: "Database is open read-only.")
         }
         try RocksBridge.writeKeyChange(database: handle, columnFamily: columnFamily, oldKey: oldKey, newKey: newKey, value: value)
+    }
+
+    func createSnapshot(id: UUID) throws {
+        guard let handle else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+        snapshots[id] = try RocksBridge.createSnapshot(database: handle)
+    }
+
+    func releaseSnapshot(id: UUID) {
+        snapshots[id]?.release()
+        snapshots[id] = nil
+    }
+
+    func createBackup(backupDirectory: String) throws -> UInt32 {
+        guard let handle else {
+            throw RocksBridgeError(code: 1, message: "Database is not open.")
+        }
+        return try RocksBridge.createBackup(database: handle, backupDirectory: backupDirectory)
+    }
+
+    func restoreLatestBackup(backupDirectory: String, destinationDirectory: String) throws {
+        if let metadata, URL(fileURLWithPath: metadata.path).standardizedFileURL == URL(fileURLWithPath: destinationDirectory).standardizedFileURL {
+            throw RocksBridgeError(code: 1, message: "Cannot restore over the currently open database. Close it first or choose another destination.")
+        }
+        try RocksBridge.restoreLatestBackup(backupDirectory: backupDirectory, destinationDirectory: destinationDirectory)
     }
 }

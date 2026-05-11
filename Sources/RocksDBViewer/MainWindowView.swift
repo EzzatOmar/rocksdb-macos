@@ -19,7 +19,7 @@ struct MainWindowView: View {
                 }
                 .accessibilityLabel("Open database")
 
-                Picker("Snapshot", selection: .constant(UUID?.none)) {
+                Picker("Snapshot", selection: $model.selectedSnapshotID) {
                     Text("Live").tag(UUID?.none)
                     ForEach(model.snapshots) { snapshot in
                         Text(snapshot.name).tag(Optional(snapshot.id))
