@@ -11,8 +11,22 @@ let package = Package(
         .executable(name: "RocksDBViewer", targets: ["RocksDBViewer"])
     ],
     targets: [
+        .target(
+            name: "CRocksBridge",
+            path: "Sources/CRocksBridge",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .unsafeFlags(["-std=c++20", "-I/opt/homebrew/opt/rocksdb/include"])
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-L/opt/homebrew/opt/rocksdb/lib"]),
+                .linkedLibrary("rocksdb"),
+                .linkedLibrary("c++")
+            ]
+        ),
         .executableTarget(
             name: "RocksDBViewer",
+            dependencies: ["CRocksBridge"],
             path: "Sources/RocksDBViewer"
         ),
         .testTarget(
