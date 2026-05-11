@@ -5,6 +5,8 @@ import SwiftUI
 final class AppModel: ObservableObject {
     static let retainedRowLimit = 2_000
     private let session = DatabaseSession()
+    private let historyStore = HistoryStore()
+    private let comparatorRegistry = ComparatorRegistry()
     private var activeScanTask: Task<Void, Never>?
 
     @Published var selectedSection: NavigationSection = .browser
@@ -29,6 +31,12 @@ final class AppModel: ObservableObject {
     @Published var prefix = ""
     @Published var exactKey = ""
     @Published var scanLimit = 256
+    @Published var discoveredColumnFamilies: [String] = []
+    @Published var comparatorValidation = ComparatorValidationResult(isValid: true, message: "Bytewise comparator is available.")
+
+    init() {
+        recentDatabases = historyStore.load()
+    }
 
     var selectedRow: KeyValueRow? {
         guard let selectedRowID else { return nil }
@@ -99,6 +107,31 @@ final class AppModel: ObservableObject {
         appendOperation(name: "Backup", detail: "Backup service pending bridge integration", progress: 0, cancellable: true)
     }
 
+    func validateComparator() {
+        comparatorValidation = comparatorRegistry.validate(comparatorProfile)
+    }
+
+    func discoverColumnFamilies(path: String) {
+        guard !path.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let families = try await session.discoverColumnFamilies(path: path)
+                await MainActor.run {
+                    self.discoveredColumnFamilies = families
+                    if let first = families.first {
+                        self.selectedColumnFamily = first
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.discoveredColumnFamilies = []
+                    self.appendOperation(name: "Column family discovery", detail: error.localizedDescription, progress: 1, cancellable: false)
+                }
+            }
+        }
+    }
+
     func openPlaceholder(path: String, mode: OpenMode) {
         let operationID = appendOperation(name: "Open database", detail: "Opening \(URL(fileURLWithPath: path).lastPathComponent)", progress: nil, cancellable: false)
         Task { [weak self] in
@@ -123,6 +156,7 @@ final class AppModel: ObservableObject {
                     )
                     self.recentDatabases.removeAll { $0.path == path }
                     self.recentDatabases.insert(recent, at: 0)
+                    self.historyStore.save(Array(self.recentDatabases.prefix(20)))
                     self.openDatabaseSheetPresented = false
                     self.updateOperation(operationID, detail: "Opened \(metadata.columnFamilies.count) column families", progress: 1)
                 }
@@ -188,6 +222,11 @@ final class AppModel: ObservableObject {
         case .hex:
             return try HexCodec.decode(text)
         }
+    }
+
+    func clearHistory() {
+        recentDatabases.removeAll()
+        historyStore.clear()
     }
 }
 

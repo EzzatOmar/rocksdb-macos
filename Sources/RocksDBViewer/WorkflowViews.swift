@@ -155,7 +155,7 @@ struct SettingsView: View {
                 LabeledContent("History entries", value: model.recentDatabases.count.formatted())
 
                 Button(role: .destructive) {
-                    model.recentDatabases.removeAll()
+                    model.clearHistory()
                 } label: {
                     Label("Clear History", systemImage: "trash")
                 }
@@ -172,6 +172,7 @@ struct OpenDatabaseSheet: View {
     @State private var path = ""
     @State private var mode: OpenMode = .readOnly
     @State private var createIfMissing = false
+    @State private var selectedColumnFamily = "default"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -183,6 +184,10 @@ struct OpenDatabaseSheet: View {
                 Button("Browse...") {
                     browse()
                 }
+                Button("Discover") {
+                    model.discoverColumnFamilies(path: path)
+                }
+                .disabled(path.isEmpty || !FileManager.default.fileExists(atPath: path))
             }
 
             Picker("Open mode", selection: $mode) {
@@ -200,11 +205,24 @@ struct OpenDatabaseSheet: View {
                     Text(profile.name).tag(profile)
                 }
             }
+            .onChange(of: model.comparatorProfile) { _, _ in
+                model.validateComparator()
+            }
+
+            LabeledContent("Validation", value: model.comparatorValidation.message)
+
+            Picker("Column family", selection: $selectedColumnFamily) {
+                ForEach((model.discoveredColumnFamilies.isEmpty ? model.columnFamilies : model.discoveredColumnFamilies), id: \.self) { family in
+                    Text(family).tag(family)
+                }
+            }
 
             List(model.recentDatabases) { recent in
                 Button {
                     path = recent.path
                     mode = recent.openMode
+                    selectedColumnFamily = recent.selectedColumnFamily ?? "default"
+                    model.discoverColumnFamilies(path: recent.path)
                 } label: {
                     VStack(alignment: .leading) {
                         Text(recent.displayName)
@@ -223,10 +241,11 @@ struct OpenDatabaseSheet: View {
                     dismiss()
                 }
                 Button("Open") {
+                    model.selectedColumnFamily = selectedColumnFamily
                     model.openPlaceholder(path: path, mode: mode)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(path.isEmpty || (!FileManager.default.fileExists(atPath: path) && !createIfMissing))
+                .disabled(path.isEmpty || !model.comparatorValidation.isValid || (!FileManager.default.fileExists(atPath: path) && !createIfMissing))
             }
         }
         .padding(20)
@@ -240,6 +259,7 @@ struct OpenDatabaseSheet: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path
+            model.discoverColumnFamilies(path: url.path)
         }
     }
 }
