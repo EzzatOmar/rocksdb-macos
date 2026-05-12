@@ -11,6 +11,12 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(preview.isTruncated)
     }
 
+    func testBytePreviewFallsBackToHexForControlBytes() {
+        let preview = BytePreview(bytes: Data([0, 1, 2, 3]), preferredDisplay: .utf8)
+
+        XCTAssertEqual(preview.text, "00 01 02 03")
+    }
+
     func testBuiltInComparatorIdentifiersAreStable() {
         let ids = ComparatorProfile.builtIns.map(\.id)
 

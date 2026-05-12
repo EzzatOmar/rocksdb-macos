@@ -14,7 +14,7 @@ final class AppModel: ObservableObject {
     @Published var columnFamilies: [String] = ["default"]
     @Published var selectedColumnFamily = "default"
     @Published var comparatorProfile = ComparatorProfile.builtIns[0]
-    @Published var rows: [KeyValueRow] = KeyValueRow.sampleRows
+    @Published var rows: [KeyValueRow] = []
     @Published var selectedRowID: KeyValueRow.ID?
     @Published var snapshots: [SnapshotRecord] = []
     @Published var backups: [BackupRecord] = []
@@ -89,6 +89,9 @@ final class AppModel: ObservableObject {
                 }
                 await MainActor.run {
                     self.updateOperation(operationID, detail: "Completed \(self.rows.count.formatted()) retained rows", progress: 1)
+                    if ProcessInfo.processInfo.environment["ROCKSDB_VIEWER_DEBUG_ROWS"] == "1" {
+                        fputs("RocksDBViewer rows=\(self.rows.count) path=\(self.activeDatabasePath ?? "")\n", stderr)
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -246,6 +249,17 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func waitForRows(path: String? = nil, timeout seconds: TimeInterval = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if !rows.isEmpty && (path == nil || activeDatabasePath == path) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return !rows.isEmpty && (path == nil || activeDatabasePath == path)
     }
 
     @discardableResult

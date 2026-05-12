@@ -1,56 +1,125 @@
+import AppKit
 import SwiftUI
 
-@main
-struct RocksDBViewerApp: App {
-    @StateObject private var model = AppModel()
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private let model = AppModel()
+    private var window: NSWindow?
+    private var hasConfiguredApplication = false
 
-    var body: some Scene {
-        WindowGroup {
-            MainWindowView(model: model)
-                .frame(minWidth: 1120, minHeight: 720)
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        configureApplication()
+    }
+
+    func configureApplication() {
+        guard !hasConfiguredApplication else { return }
+        hasConfiguredApplication = true
+
+        NSApp.setActivationPolicy(.regular)
+        NSWindow.allowsAutomaticWindowTabbing = false
+        configureMenu()
+
+        let rootView = MainWindowView(model: model)
+            .frame(minWidth: 1120, minHeight: 720)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "RocksDB Viewer"
+        window.contentView = NSHostingView(rootView: rootView)
+        window.center()
+        window.delegate = self
+        window.isRestorable = false
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let openPath = ProcessInfo.processInfo.environment["ROCKSDB_VIEWER_OPEN_PATH"], !openPath.isEmpty {
+            model.openPlaceholder(path: openPath, mode: .readOnly)
         }
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open Database...") {
-                    model.presentOpenDatabase()
-                }
-                .keyboardShortcut("o", modifiers: .command)
+    }
 
-                Button("Add Key-Value") {
-                    model.presentEditSheet(mode: .add)
-                }
-                .keyboardShortcut("n", modifiers: .command)
-                .disabled(!model.canWrite)
-            }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
 
-            CommandGroup(after: .textEditing) {
-                Button("Focus Search") {
-                    model.selectedSection = .search
-                }
-                .keyboardShortcut("f", modifiers: .command)
+    @objc private func openDatabase() {
+        model.presentOpenDatabase()
+        showWindow()
+    }
 
-                Button("Edit Selected Row") {
-                    model.presentEditSheet(mode: .edit)
-                }
-                .keyboardShortcut("e", modifiers: .command)
-                .disabled(!model.canEditSelection)
+    @objc private func focusSearch() {
+        model.selectedSection = .search
+        showWindow()
+    }
 
-                Button("Refresh Scan") {
-                    model.refreshCurrentScan()
-                }
-                .keyboardShortcut("r", modifiers: .command)
+    @objc private func addKeyValue() {
+        model.presentEditSheet(mode: .add)
+        showWindow()
+    }
 
-                Button("Cancel Operation") {
-                    model.cancelActiveOperation()
-                }
-                .keyboardShortcut(".", modifiers: .command)
+    @objc private func editSelectedRow() {
+        model.presentEditSheet(mode: .edit)
+        showWindow()
+    }
 
-                Button("Backup Now") {
-                    model.selectedSection = .snapshotsBackups
-                    model.startBackup()
-                }
-                .keyboardShortcut("b", modifiers: .command)
-            }
-        }
+    @objc private func refreshScan() {
+        model.refreshCurrentScan()
+    }
+
+    @objc private func cancelOperation() {
+        model.cancelActiveOperation()
+    }
+
+    @objc private func backupNow() {
+        model.selectedSection = .snapshotsBackups
+        model.startBackup()
+        showWindow()
+    }
+
+    private func showWindow() {
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func configureMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Quit RocksDB Viewer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(menuItem("Open Database...", action: #selector(openDatabase), key: "o"))
+        fileMenu.addItem(menuItem("Add Key-Value", action: #selector(addKeyValue), key: "n"))
+        fileMenu.addItem(menuItem("Backup Now", action: #selector(backupNow), key: "b"))
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(menuItem("Focus Search", action: #selector(focusSearch), key: "f"))
+        editMenu.addItem(menuItem("Edit Selected Row", action: #selector(editSelectedRow), key: "e"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(menuItem("Refresh Scan", action: #selector(refreshScan), key: "r"))
+        editMenu.addItem(menuItem("Cancel Operation", action: #selector(cancelOperation), key: "."))
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func menuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        return item
     }
 }

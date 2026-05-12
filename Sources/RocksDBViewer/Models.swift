@@ -79,11 +79,14 @@ struct BytePreview: Hashable {
     var text: String {
         switch preferredDisplay {
         case .utf8, .json:
-            String(data: bytes, encoding: .utf8) ?? hexString
+            guard let string = String(data: bytes, encoding: .utf8), string.isMostlyPrintable else {
+                return hexString
+            }
+            return string
         case .hex:
-            hexString
+            return hexString
         case .raw:
-            bytes.map { byte in
+            return bytes.map { byte in
                 byte >= 32 && byte <= 126 ? String(UnicodeScalar(byte)) : "."
             }.joined()
         }
@@ -91,6 +94,16 @@ struct BytePreview: Hashable {
 
     var hexString: String {
         bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
+    }
+}
+
+private extension String {
+    var isMostlyPrintable: Bool {
+        guard !isEmpty else { return true }
+        let printable = unicodeScalars.filter { scalar in
+            scalar == "\n" || scalar == "\r" || scalar == "\t" || !CharacterSet.controlCharacters.contains(scalar)
+        }.count
+        return Double(printable) / Double(unicodeScalars.count) >= 0.85
     }
 }
 
