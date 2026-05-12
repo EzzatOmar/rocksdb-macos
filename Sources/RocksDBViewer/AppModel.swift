@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var backupDirectory: String = ""
     @Published var openDatabaseSheetPresented = false
     @Published var editSheetMode: EditSheetMode?
+    @Published var deleteConfirmationPresented = false
     @Published var activeDatabasePath: String?
     @Published var openMode: OpenMode = .readOnly
     @Published var scanMode: ScanMode = .range
@@ -46,12 +47,29 @@ final class AppModel: ObservableObject {
         return rows.first { $0.id == selectedRowID }
     }
 
+    var isViewingSnapshot: Bool {
+        selectedSnapshotID != nil
+    }
+
     var canWrite: Bool {
-        activeDatabasePath != nil && openMode == .readWrite
+        activeDatabasePath != nil && openMode == .readWrite && !isViewingSnapshot
     }
 
     var canEditSelection: Bool {
         canWrite && selectedRow != nil
+    }
+
+    var writeUnavailableReason: String? {
+        guard activeDatabasePath != nil else {
+            return "Open a database before editing."
+        }
+        guard openMode == .readWrite else {
+            return "Reopen the database in read-write mode to edit or delete rows."
+        }
+        guard !isViewingSnapshot else {
+            return "Snapshot views are read-only. Switch the snapshot selector back to Live to edit."
+        }
+        return nil
     }
 
     func presentOpenDatabase() {
@@ -338,7 +356,7 @@ final class AppModel: ObservableObject {
 
     func saveKeyValue(mode: EditSheetMode, keyText: String, valueText: String, encoding: ValueDisplayMode) async -> String? {
         guard canWrite else {
-            return "Database is open read-only."
+            return writeUnavailableReason ?? "Database is open read-only."
         }
         do {
             let newKey = try Self.decode(keyText, encoding: encoding)
@@ -381,7 +399,7 @@ final class AppModel: ObservableObject {
 
     func deleteSelectedKey() async -> String? {
         guard canWrite else {
-            return "Database is open read-only."
+            return writeUnavailableReason ?? "Database is open read-only."
         }
         guard let selectedRow else {
             return "No row is selected."

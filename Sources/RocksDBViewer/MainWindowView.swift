@@ -2,6 +2,8 @@ import SwiftUI
 
 struct MainWindowView: View {
     @ObservedObject var model: AppModel
+    @State private var deletionMessage = ""
+    @State private var isDeleting = false
 
     var body: some View {
         NavigationSplitView {
@@ -56,6 +58,37 @@ struct MainWindowView: View {
         }
         .sheet(item: $model.editSheetMode) { mode in
             EditKeyValueSheet(model: model, mode: mode)
+        }
+        .confirmationDialog("Delete selected key?", isPresented: $model.deleteConfirmationPresented, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                deleteSelectedRow()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Delete cannot be undone unless a backup exists.")
+        }
+        .alert("Delete failed", isPresented: Binding(
+            get: { !deletionMessage.isEmpty },
+            set: { if !$0 { deletionMessage = "" } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(deletionMessage)
+        }
+    }
+
+    private func deleteSelectedRow() {
+        guard !isDeleting else { return }
+        isDeleting = true
+        deletionMessage = ""
+        Task {
+            let message = await model.deleteSelectedKey()
+            await MainActor.run {
+                isDeleting = false
+                if let message {
+                    deletionMessage = message
+                }
+            }
         }
     }
 }
@@ -181,7 +214,7 @@ private struct BrowserView: View {
                 }
                 .accessibilityLabel("Key-value table")
 
-                InspectorView(row: model.selectedRow)
+                InspectorView(model: model)
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
             }
         }
@@ -189,7 +222,7 @@ private struct BrowserView: View {
 }
 
 private struct InspectorView: View {
-    let row: KeyValueRow?
+    @ObservedObject var model: AppModel
     @State private var displayMode: ValueDisplayMode = .utf8
 
     var body: some View {
@@ -197,7 +230,7 @@ private struct InspectorView: View {
             Text("Inspector")
                 .font(.headline)
 
-            if let row {
+            if let row = model.selectedRow {
                 LabeledContent("Sequence", value: row.sequenceIndex.formatted())
                 LabeledContent("Key bytes", value: row.keySize.formatted())
                 LabeledContent("Value bytes", value: row.valueSize.formatted())
@@ -224,13 +257,30 @@ private struct InspectorView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if let reason = model.writeUnavailableReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Button("Load Full Value") {}
                         .disabled(true)
-                    Button("Edit") {}
-                        .disabled(true)
-                    Button("Delete", role: .destructive) {}
-                        .disabled(true)
+                    Button {
+                        model.presentEditSheet(mode: .edit)
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .disabled(!model.canEditSelection)
+                    .accessibilityLabel("Edit selected row")
+
+                    Button(role: .destructive) {
+                        model.deleteConfirmationPresented = true
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .disabled(!model.canEditSelection)
+                    .accessibilityLabel("Delete selected row")
                 }
             } else {
                 ContentUnavailableView("No Row Selected", systemImage: "cursorarrow.click")

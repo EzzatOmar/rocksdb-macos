@@ -40,7 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         if let openPath = ProcessInfo.processInfo.environment["ROCKSDB_VIEWER_OPEN_PATH"], !openPath.isEmpty {
-            model.openPlaceholder(path: openPath, mode: .readOnly)
+            let openMode: OpenMode = ProcessInfo.processInfo.environment["ROCKSDB_VIEWER_OPEN_MODE"] == "readWrite" ? .readWrite : .readOnly
+            model.openPlaceholder(path: openPath, mode: openMode)
         }
     }
 
@@ -64,7 +65,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func editSelectedRow() {
+        guard model.canEditSelection else { return }
         model.presentEditSheet(mode: .edit)
+        showWindow()
+    }
+
+    @objc private func deleteSelectedRow() {
+        guard model.canEditSelection else { return }
+        model.deleteConfirmationPresented = true
         showWindow()
     }
 
@@ -108,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(menuItem("Focus Search", action: #selector(focusSearch), key: "f"))
         editMenu.addItem(menuItem("Edit Selected Row", action: #selector(editSelectedRow), key: "e"))
+        editMenu.addItem(menuItem("Delete Selected Row", action: #selector(deleteSelectedRow), key: "\u{8}", modifiers: []))
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(menuItem("Refresh Scan", action: #selector(refreshScan), key: "r"))
         editMenu.addItem(menuItem("Cancel Operation", action: #selector(cancelOperation), key: "."))
@@ -117,8 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    private func menuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
+    private func menuItem(_ title: String, action: Selector, key: String, modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = modifiers
         item.target = self
         return item
     }

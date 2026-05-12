@@ -95,4 +95,91 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(secondModel.activeDatabasePath, dbURL.path)
         XCTAssertEqual(secondModel.backupDirectory, backupURL.path)
     }
+
+    func testAddEditRenameAndDeleteSelectedRow() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rocksdb-viewer-edit-\(UUID().uuidString)", isDirectory: true)
+        let historyURL = root.appendingPathComponent("history/recent.json")
+        let dbURL = root.appendingPathComponent("editable.rocksdb", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let model = AppModel(historyStore: HistoryStore(fileURL: historyURL))
+        let openMessage = await model.openDatabase(path: dbURL.path, mode: .readWrite, createIfMissing: true, selectedColumnFamily: "default", backupDirectory: nil)
+        XCTAssertNil(openMessage)
+
+        let addMessage = await model.saveKeyValue(mode: .add, keyText: "alpha", valueText: "one", encoding: .utf8)
+        XCTAssertNil(addMessage)
+        let addRowsLoaded = await model.waitForRows(path: dbURL.path)
+        XCTAssertTrue(addRowsLoaded)
+        var row = try XCTUnwrap(model.rows.first { $0.keyPreview.text == "alpha" })
+        model.selectedRowID = row.id
+
+        let editMessage = await model.saveKeyValue(mode: .edit, keyText: "alpha", valueText: "two", encoding: .utf8)
+        XCTAssertNil(editMessage)
+        let editRowsLoaded = await model.waitForRows(path: dbURL.path)
+        XCTAssertTrue(editRowsLoaded)
+        row = try XCTUnwrap(model.rows.first { $0.keyPreview.text == "alpha" })
+        XCTAssertEqual(row.valuePreview.text, "two")
+        model.selectedRowID = row.id
+
+        let renameMessage = await model.saveKeyValue(mode: .edit, keyText: "beta", valueText: "three", encoding: .utf8)
+        XCTAssertNil(renameMessage)
+        let renameRowsLoaded = await model.waitForRows(path: dbURL.path)
+        XCTAssertTrue(renameRowsLoaded)
+        XCTAssertNil(model.rows.first { $0.keyPreview.text == "alpha" })
+        row = try XCTUnwrap(model.rows.first { $0.keyPreview.text == "beta" })
+        XCTAssertEqual(row.valuePreview.text, "three")
+        model.selectedRowID = row.id
+
+        let deleteMessage = await model.deleteSelectedKey()
+        XCTAssertNil(deleteMessage)
+        XCTAssertNil(model.rows.first { $0.keyPreview.text == "beta" })
+    }
+
+    func testReadOnlyAndSnapshotSelectionBlockWrites() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rocksdb-viewer-write-guards-\(UUID().uuidString)", isDirectory: true)
+        let historyURL = root.appendingPathComponent("history/recent.json")
+        let dbURL = root.appendingPathComponent("guarded.rocksdb", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let model = AppModel(historyStore: HistoryStore(fileURL: historyURL))
+        let openMessage = await model.openDatabase(path: dbURL.path, mode: .readWrite, createIfMissing: true, selectedColumnFamily: "default", backupDirectory: nil)
+        XCTAssertNil(openMessage)
+        let addMessage = await model.saveKeyValue(mode: .add, keyText: "locked", valueText: "live", encoding: .utf8)
+        XCTAssertNil(addMessage)
+        let rowsLoaded = await model.waitForRows(path: dbURL.path)
+        XCTAssertTrue(rowsLoaded)
+        model.selectedRowID = try XCTUnwrap(model.rows.first?.id)
+
+        model.createSnapshot()
+        let snapshotAppeared = await waitUntil {
+            !model.snapshots.isEmpty && model.selectedSnapshotID != nil
+        }
+        XCTAssertTrue(snapshotAppeared)
+        XCTAssertFalse(model.canWrite)
+        let snapshotEditMessage = await model.saveKeyValue(mode: .edit, keyText: "locked", valueText: "blocked", encoding: .utf8)
+        XCTAssertEqual(snapshotEditMessage, "Snapshot views are read-only. Switch the snapshot selector back to Live to edit.")
+        let snapshotDeleteMessage = await model.deleteSelectedKey()
+        XCTAssertEqual(snapshotDeleteMessage, "Snapshot views are read-only. Switch the snapshot selector back to Live to edit.")
+
+        model.selectedSnapshotID = nil
+        XCTAssertTrue(model.canWrite)
+
+        let readOnlyOpenMessage = await model.openDatabase(path: dbURL.path, mode: .readOnly, createIfMissing: false, selectedColumnFamily: "default", backupDirectory: nil)
+        XCTAssertNil(readOnlyOpenMessage)
+        let readOnlyAddMessage = await model.saveKeyValue(mode: .add, keyText: "read-only", valueText: "blocked", encoding: .utf8)
+        XCTAssertEqual(readOnlyAddMessage, "Reopen the database in read-write mode to edit or delete rows.")
+    }
+
+    private func waitUntil(timeout seconds: TimeInterval = 5, condition: @MainActor @escaping () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return condition()
+    }
 }
