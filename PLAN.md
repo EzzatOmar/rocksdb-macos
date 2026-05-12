@@ -1,112 +1,181 @@
-# RocksDB Viewer macOS Implementation Plan
+# Implementation Plan: Close SPEC.md Gaps
 
-This plan is anchored to `spec/SPEC.md` and must be reread with the spec after any context compaction or before any subagent starts work.
+This plan replaces the archived phase plan at `docs/archive/PLAN.phase-0-through-6.md`.
 
-## Constraints From SPEC.md
+Before continuing implementation after any compaction or delegation, read:
 
-- Build a native Swift macOS app with a minimal footprint, macOS 14 minimum and macOS 15 optimized (`SPEC.md` sections 1, 3, 12).
-- Use SwiftUI for primary UI, AppKit only for file panels and desktop behaviors (`SPEC.md` sections 3, 7.2, 8).
-- Access RocksDB through a narrow owned bridge; SwiftUI must not hold raw RocksDB pointers (`SPEC.md` sections 3, 7.1, 18.1).
-- Keep memory bounded: stream rows in batches, retain only a limited row window, preview values at 4 KiB by default, never load all keys or values into Swift arrays (`SPEC.md` sections 2, 3, 6.3, 7.3, 12).
-- Implement MVP workflows: open/recent history, column family selection, comparators, browse, exact/prefix/range/reverse scan, add/edit/delete, snapshots, backup, restore, progress/cancel (`SPEC.md` sections 5.1, 9, 11, 19).
-- UI should be a dense macOS utility, not a landing page (`SPEC.md` section 8).
+- `spec/SPEC.md`
+- `docs/rocksdb/README.md`
+- `docs/implementation-gap-audit.md`
+- this `PLAN.md`
 
-## Branch Phases
+## Current State
 
-Each phase gets its own branch so milestones can be reviewed independently. Branches are cumulative unless noted.
+The app can launch from `./scripts/run-app.sh`, open `jazz.rocksdb`, and display rows. Core RocksDB access exists, but several SPEC.md MVP items are still incomplete or only scaffolded.
 
-### Phase 0: Plan
+Verification baseline:
 
-- Branch: `codex/phase-0-plan`
-- Deliverable: `PLAN.md`
-- Acceptance:
-  - Plan references the spec sections that drive architecture and product behavior.
-  - Plan lists branch names and acceptance criteria for incremental milestones.
+```bash
+swift test
+./scripts/build-app.sh
+ROCKSDB_VIEWER_OPEN_PATH=/Users/omarezzat/Workspace/rocksdb-macos/jazz.rocksdb ROCKSDB_VIEWER_DEBUG_ROWS=1 .build/arm64-apple-macosx/debug/RocksDBViewer
+swift run rocksdb-viewer-bench scan jazz.rocksdb --limit 49
+```
 
-### Phase 1: SwiftPM App Skeleton
+## Phase A: Open Flow Correctness
 
-- Branch: `codex/phase-1-swiftpm-shell`
-- Deliverables:
-  - `Package.swift`
-  - SwiftUI app entry point and main window shell.
-  - Core model types matching `SPEC.md` section 6.
-  - Minimal AppShell layout: sidebar, toolbar, browser table, inspector, search panel, snapshots/backups panel, operation log/settings placeholders.
-- Acceptance:
-  - `swift build` succeeds.
-  - App can launch with `swift run RocksDBViewer`.
-  - Fresh UI starts without opening RocksDB automatically, matching `SPEC.md` section 12.1.
+Branch: `codex/open-flow-completion`
 
-### Phase 2: RocksDB Bridge and Session Core
+Goals:
 
-- Branch: `codex/phase-2-rocksdb-bridge`
-- Deliverables:
-  - Narrow Objective-C++ bridge linked to local RocksDB.
-  - `DatabaseSession` actor that owns the bridge handle.
-  - Column family discovery/open, close lifecycle, read-only/read-write modes.
-  - Swift-friendly error mapping.
-- Acceptance:
-  - `swift build` succeeds.
-  - Unit tests open the included `jazz.rocksdb` database read-only if available.
-  - Swift types never expose raw RocksDB pointers to UI code.
+- Make `Create if missing` functional and pass it into `DatabaseOpenRequest`.
+- Keep sheet-local selected column family synchronized after discovery.
+- Reopen recent databases directly from recent rows.
+- Show open/discovery validation errors in the open sheet.
+- Add lock/read-write warning messaging.
+- Persist backup directory per recent database.
 
-### Phase 3: Streaming Browser and Search
+Acceptance:
 
-- Branch: `codex/phase-3-scan-browser`
-- Deliverables:
-  - `ScanEngine` with exact lookup, prefix scan, bounded range scan, forward and reverse direction.
-  - Bounded row retention and 4 KiB preview limit.
-  - Browser table and inspector wired to live scan results.
-  - Cancellation for active scans.
-- Acceptance:
-  - `swift test` covers byte decoding, previews, exact lookup, and bounded scan behavior.
-  - UI requests rows in batches and caps retained rows at 2,000 by default.
-  - Cancelling a scan releases iterator work promptly.
+- Tests cover create-if-missing, failed open not added to history, and recent reopen.
+- Manual app flow can open `jazz.rocksdb` from Browse and from Recent.
 
-### Phase 4: Open Flow, History, and Comparators
+## Phase B: True Streaming And Preview Safety
 
-- Branch: `codex/phase-4-open-history-comparators`
-- Deliverables:
-  - Open database sheet with path picker, recent list, open mode, create-if-missing toggle, column family discovery, comparator selection.
-  - `HistoryStore` in Application Support using Codable JSON.
-  - `ComparatorRegistry` with built-in bytewise, reverse bytewise, fixed-width signed integer, fixed-width unsigned integer, and UTF-8 lexical profiles.
-  - Custom comparator bundle validation UI scaffold with explicit unsupported/validation messaging where bridge integration is limited.
-- Acceptance:
-  - Successful open updates history metadata only.
-  - Failed open does not create history.
-  - Comparator profile identity is persisted with recent database metadata.
+Branch: `codex/streaming-preview-safety`
 
-### Phase 5: Writes and Safety Dialogs
+Goals:
 
-- Branch: `codex/phase-5-writes-safety`
-- Deliverables:
-  - Add/edit/delete sheet with UTF-8, hex, JSON, and raw byte views.
-  - Write path through bridge: put, delete, and atomic key change via write batch.
-  - Read-only and snapshot views disable write controls.
-  - Delete and unsaved-edit confirmations.
-- Acceptance:
-  - `swift test` covers encoding validation and write guards.
-  - Save failure leaves UI state unchanged.
-  - Destructive actions require confirmation.
+- Replace array-returning scan bridge with callback/batch delivery into Swift.
+- Emit UI batches as RocksDB iterates, not after the whole limit is scanned.
+- Keep retained row cap independent from scan limit.
+- Add a preview-only exact lookup path that does not copy full values.
+- Implement `Load Full Value` with explicit size warning.
+- Make reverse prefix bounds correct for arbitrary bytes or document unsupported byte patterns.
 
-### Phase 6: Snapshots, Backup, Restore, and Polish
+Acceptance:
 
-- Branch: `codex/phase-6-snapshots-backups-polish`
-- Deliverables:
-  - Snapshot create/release and snapshot selector.
-  - Backup creation and restore to selected destination with progress/cancel UI.
-  - Restore-over-open-database guard.
-  - Keyboard shortcuts from `SPEC.md` section 17.
-  - Accessibility labels for primary controls.
-  - Focused perf harness commands for open/get/scan.
-- Acceptance:
-  - `swift build` and `swift test` pass.
-  - Manual app run can open `jazz.rocksdb`, browse rows, run searches, create/release snapshots, and show backup/restore operations.
-  - MVP release checklist from `SPEC.md` section 19 is implemented or has a clearly documented local limitation.
+- Test proves first batch is delivered before full scan completion.
+- Test proves exact lookup of large values retains only preview bytes until full load.
+- Cancel test proves scan stops promptly.
 
-## Implementation Notes
+## Phase C: Comparator Implementation
 
-- Prefer SwiftPM commands for build and tests: `swift build`, `swift test`, and `swift run RocksDBViewer`.
-- Link RocksDB from Homebrew when present at `/opt/homebrew/opt/rocksdb`; keep the bridge small and isolated so linking flags are easy to adjust.
-- Keep UI row state bounded: default scan batch size 256, retained row cap 2,000, preview byte limit 4 KiB.
-- Do not cache key or value contents in history or settings.
-- Use `jazz.rocksdb` only as a local fixture for read-only smoke testing.
+Branch: `codex/comparator-bridge`
+
+Goals:
+
+- Implement C++ comparator adapters for built-ins:
+  - Bytewise.
+  - Reverse bytewise.
+  - Fixed-width signed integer.
+  - Fixed-width unsigned integer.
+  - UTF-8 lexical.
+- Pass selected comparator profile into RocksDB open options.
+- Add comparator sample-ordering preview UI.
+- Implement custom comparator bundle loading or explicitly narrow MVP to supported C ABI bundles with a clear loader.
+
+Acceptance:
+
+- Tests create/open fixture DBs for each built-in comparator.
+- Opening with comparator profile changes scan ordering where expected.
+- Custom comparator validation has a real success path or a documented MVP deferral approved in `SPEC.md`.
+
+## Phase D: Editing Completion
+
+Branch: `codex/editing-completion`
+
+Goals:
+
+- Split key and value encoding controls.
+- Load full key/value for edit where needed.
+- Keep write controls disabled when a snapshot is selected.
+- Add row-switch unsaved-change confirmation.
+- Wire Delete keyboard shortcut.
+- Refresh only affected rows when feasible.
+
+Acceptance:
+
+- Tests cover add, edit same key, rename key via `WriteBatch`, conflict, delete, read-only guard, snapshot guard.
+- Manual app flow can add/edit/delete in a temp DB.
+
+## Phase E: Backup And Restore Completion
+
+Branch: `codex/backup-restore-completion`
+
+Goals:
+
+- Add bridge APIs for `GetBackupInfo()`, `VerifyBackup()`, and selected `RestoreDBFromBackup(id, ...)`.
+- List existing backups from backup directory.
+- Restore selected backup ID, not only latest.
+- Persist backup location per database.
+- Add operation progress callbacks where RocksDB exposes them; otherwise show coarse staged progress.
+- Implement backup cancellation using `BackupEngine::StopBackup()` where possible.
+- Strengthen restore confirmation with source backup, destination, and overwrite warning.
+
+Acceptance:
+
+- Tests create multiple backups and restore a selected older backup.
+- UI lists backup IDs after app restart.
+- Restore over currently open DB remains blocked.
+
+## Phase F: UX, Accessibility, And Verification
+
+Branch: `codex/ux-accessibility-verification`
+
+Goals:
+
+- Add accessibility labels to all primary controls.
+- Make Command-F focus the search field.
+- Verify keyboard shortcuts from `SPEC.md` section 17.
+- Add app-level smoke automation for:
+  - launch,
+  - open DB,
+  - visible rows,
+  - search,
+  - snapshot,
+  - backup.
+- Reduce launch instructions to one supported path: `./scripts/run-app.sh`.
+
+Acceptance:
+
+- Automated smoke test verifies app window plus visible row count.
+- `swift test` passes.
+- `./scripts/run-app.sh` opens a visible window.
+
+## Phase G: Performance Harness
+
+Branch: `codex/performance-harness`
+
+Goals:
+
+- Add deterministic fixture generator:
+  - tiny,
+  - small,
+  - many-cf,
+  - large-values,
+  - comparator datasets.
+- Expand benchmark commands:
+  - open,
+  - exact get,
+  - scan,
+  - cancel,
+  - backup,
+  - restore.
+- Add XCTest performance tests for bridge and scan engine.
+- Record memory/RSS checkpoints where possible.
+- Address Homebrew RocksDB deployment-target warning by documenting or building a compatible local RocksDB.
+
+Acceptance:
+
+- Fixture generator can create at least `tiny`, `small`, and `large-values`.
+- Benchmarks print stable machine-readable metrics.
+- Performance gates from `SPEC.md` section 13.5 are either passing or explicitly marked as not yet met.
+
+## Do Not Regress
+
+- App launch through `.build/RocksDBViewer.app`.
+- Opening `jazz.rocksdb` displays non-placeholder rows.
+- History stores metadata only.
+- SwiftUI/AppKit code never holds raw RocksDB pointers.
+- Bridge owns DB, column family, iterator, snapshot, and backup lifetimes.
