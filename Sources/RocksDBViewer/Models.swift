@@ -22,6 +22,7 @@ struct RecentDatabase: Codable, Identifiable, Hashable {
     var openMode: OpenMode
     var selectedColumnFamily: String?
     var comparatorProfileID: String?
+    var backupDirectory: String?
     var lastKnownColumnFamilies: [String]
 }
 

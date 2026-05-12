@@ -11,6 +11,11 @@ struct HistoryStore {
         fileURL = directory.appendingPathComponent("recent-databases.json")
     }
 
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    }
+
     func load() -> [RecentDatabase] {
         guard let data = try? Data(contentsOf: fileURL) else { return [] }
         return (try? JSONDecoder.history.decode([RecentDatabase].self, from: data)) ?? []

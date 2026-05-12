@@ -221,6 +221,8 @@ struct OpenDatabaseSheet: View {
     @State private var mode: OpenMode = .readOnly
     @State private var createIfMissing = false
     @State private var selectedColumnFamily = "default"
+    @State private var validationMessage = ""
+    @State private var isWorking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -233,7 +235,7 @@ struct OpenDatabaseSheet: View {
                     browse()
                 }
                 Button("Discover") {
-                    model.discoverColumnFamilies(path: path)
+                    discover(path)
                 }
                 .disabled(path.isEmpty || !FileManager.default.fileExists(atPath: path))
             }
@@ -246,7 +248,17 @@ struct OpenDatabaseSheet: View {
             .pickerStyle(.segmented)
 
             Toggle("Create if missing", isOn: $createIfMissing)
-                .disabled(true)
+                .onChange(of: createIfMissing) { _, newValue in
+                    if newValue && selectedColumnFamily.isEmpty {
+                        selectedColumnFamily = "default"
+                    }
+                }
+
+            if mode == .readWrite {
+                Label("Read-write mode takes the RocksDB lock. If another process holds it, open will fail.", systemImage: "lock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Picker("Comparator", selection: $model.comparatorProfile) {
                 ForEach(ComparatorProfile.builtIns) { profile in
@@ -264,13 +276,24 @@ struct OpenDatabaseSheet: View {
                     Text(family).tag(family)
                 }
             }
+            .onChange(of: model.discoveredColumnFamilies) { _, families in
+                selectedColumnFamily = families.first ?? "default"
+            }
+
+            if !validationMessage.isEmpty {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
 
             List(model.recentDatabases) { recent in
                 Button {
                     path = recent.path
                     mode = recent.openMode
                     selectedColumnFamily = recent.selectedColumnFamily ?? "default"
-                    model.discoverColumnFamilies(path: recent.path)
+                    model.backupDirectory = recent.backupDirectory ?? ""
+                    open(path: recent.path, mode: recent.openMode, columnFamily: recent.selectedColumnFamily ?? "default", backupDirectory: recent.backupDirectory)
                 } label: {
                     VStack(alignment: .leading) {
                         Text(recent.displayName)
@@ -289,11 +312,10 @@ struct OpenDatabaseSheet: View {
                     dismiss()
                 }
                 Button("Open") {
-                    model.selectedColumnFamily = selectedColumnFamily
-                    model.openPlaceholder(path: path, mode: mode)
+                    open(path: path, mode: mode, columnFamily: selectedColumnFamily, backupDirectory: model.backupDirectory)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(path.isEmpty || !model.comparatorValidation.isValid || (!FileManager.default.fileExists(atPath: path) && !createIfMissing))
+                .disabled(isWorking || path.isEmpty || !model.comparatorValidation.isValid || (!FileManager.default.fileExists(atPath: path) && !createIfMissing))
             }
         }
         .padding(20)
@@ -307,7 +329,45 @@ struct OpenDatabaseSheet: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path
-            model.discoverColumnFamilies(path: url.path)
+            discover(url.path)
+        }
+    }
+
+    private func discover(_ path: String) {
+        validationMessage = ""
+        isWorking = true
+        Task {
+            let message = await model.discoverColumnFamilies(path: path)
+            await MainActor.run {
+                isWorking = false
+                if let message {
+                    validationMessage = message
+                } else {
+                    selectedColumnFamily = model.discoveredColumnFamilies.first ?? "default"
+                }
+            }
+        }
+    }
+
+    private func open(path: String, mode: OpenMode, columnFamily: String, backupDirectory: String?) {
+        validationMessage = ""
+        isWorking = true
+        Task {
+            let message = await model.openDatabase(
+                path: path,
+                mode: mode,
+                createIfMissing: createIfMissing,
+                selectedColumnFamily: columnFamily,
+                backupDirectory: backupDirectory
+            )
+            await MainActor.run {
+                isWorking = false
+                if let message {
+                    validationMessage = message
+                } else {
+                    dismiss()
+                }
+            }
         }
     }
 }

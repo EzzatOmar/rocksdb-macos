@@ -5,7 +5,7 @@ import SwiftUI
 final class AppModel: ObservableObject {
     static let retainedRowLimit = 2_000
     private let session = DatabaseSession()
-    private let historyStore = HistoryStore()
+    private let historyStore: HistoryStore
     private let comparatorRegistry = ComparatorRegistry()
     private var activeScanTask: Task<Void, Never>?
 
@@ -36,7 +36,8 @@ final class AppModel: ObservableObject {
     @Published var discoveredColumnFamilies: [String] = []
     @Published var comparatorValidation = ComparatorValidationResult(isValid: true, message: "Bytewise comparator is available.")
 
-    init() {
+    init(historyStore: HistoryStore = HistoryStore()) {
+        self.historyStore = historyStore
         recentDatabases = historyStore.load()
     }
 
@@ -113,6 +114,7 @@ final class AppModel: ObservableObject {
             appendOperation(name: "Backup", detail: "Choose a backup directory first", progress: 1, cancellable: false)
             return
         }
+        persistCurrentRecentMetadata()
         let operationID = appendOperation(name: "Backup", detail: "Creating backup", progress: nil, cancellable: true)
         Task { [weak self] in
             guard let self else { return }
@@ -191,63 +193,65 @@ final class AppModel: ObservableObject {
         comparatorValidation = comparatorRegistry.validate(comparatorProfile)
     }
 
-    func discoverColumnFamilies(path: String) {
-        guard !path.isEmpty else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let families = try await session.discoverColumnFamilies(path: path)
-                await MainActor.run {
-                    self.discoveredColumnFamilies = families
-                    if let first = families.first {
-                        self.selectedColumnFamily = first
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.discoveredColumnFamilies = []
-                    self.appendOperation(name: "Column family discovery", detail: error.localizedDescription, progress: 1, cancellable: false)
-                }
+    @discardableResult
+    func discoverColumnFamilies(path: String) async -> String? {
+        guard !path.isEmpty else { return "Database path is empty." }
+        do {
+            let families = try await session.discoverColumnFamilies(path: path)
+            discoveredColumnFamilies = families
+            if let first = families.first {
+                selectedColumnFamily = first
             }
+            return nil
+        } catch {
+            discoveredColumnFamilies = []
+            appendOperation(name: "Column family discovery", detail: error.localizedDescription, progress: 1, cancellable: false)
+            return error.localizedDescription
         }
     }
 
     func openPlaceholder(path: String, mode: OpenMode) {
+        openDatabase(path: path, mode: mode, createIfMissing: false, selectedColumnFamily: selectedColumnFamily)
+    }
+
+    func openDatabase(path: String, mode: OpenMode, createIfMissing: Bool, selectedColumnFamily requestedColumnFamily: String?) {
+        Task {
+            _ = await openDatabase(path: path, mode: mode, createIfMissing: createIfMissing, selectedColumnFamily: requestedColumnFamily, backupDirectory: backupDirectory)
+        }
+    }
+
+    @discardableResult
+    func openDatabase(path: String, mode: OpenMode, createIfMissing: Bool, selectedColumnFamily requestedColumnFamily: String?, backupDirectory requestedBackupDirectory: String?) async -> String? {
         let operationID = appendOperation(name: "Open database", detail: "Opening \(URL(fileURLWithPath: path).lastPathComponent)", progress: nil, cancellable: false)
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let metadata = try await session.open(DatabaseOpenRequest(path: path, mode: mode, createIfMissing: false, selectedColumnFamily: selectedColumnFamily))
-                await MainActor.run {
-                    self.activeDatabasePath = path
-                    self.openMode = metadata.openMode
-                    self.columnFamilies = metadata.columnFamilies
-                    self.selectedColumnFamily = metadata.selectedColumnFamily
-                    self.rows.removeAll(keepingCapacity: true)
-                    let recent = RecentDatabase(
-                        id: UUID(),
-                        path: path,
-                        displayName: URL(fileURLWithPath: path).lastPathComponent,
-                        lastOpenedAt: .now,
-                        openMode: mode,
-                        selectedColumnFamily: metadata.selectedColumnFamily,
-                        comparatorProfileID: self.comparatorProfile.id,
-                        lastKnownColumnFamilies: metadata.columnFamilies
-                    )
-                    self.recentDatabases.removeAll { $0.path == path }
-                    self.recentDatabases.insert(recent, at: 0)
-                    self.historyStore.save(Array(self.recentDatabases.prefix(20)))
-                    self.openDatabaseSheetPresented = false
-                    self.updateOperation(operationID, detail: "Opened \(metadata.columnFamilies.count) column families", progress: 1)
-                }
-                await MainActor.run {
-                    self.refreshCurrentScan()
-                }
-            } catch {
-                await MainActor.run {
-                    self.updateOperation(operationID, detail: error.localizedDescription, progress: 1)
-                }
-            }
+        do {
+            let metadata = try await session.open(DatabaseOpenRequest(path: path, mode: mode, createIfMissing: createIfMissing, selectedColumnFamily: requestedColumnFamily))
+            activeDatabasePath = path
+            openMode = metadata.openMode
+            columnFamilies = metadata.columnFamilies
+            selectedColumnFamily = metadata.selectedColumnFamily
+            backupDirectory = requestedBackupDirectory ?? ""
+            rows.removeAll(keepingCapacity: true)
+            let recent = RecentDatabase(
+                id: UUID(),
+                path: path,
+                displayName: URL(fileURLWithPath: path).lastPathComponent,
+                lastOpenedAt: .now,
+                openMode: mode,
+                selectedColumnFamily: metadata.selectedColumnFamily,
+                comparatorProfileID: comparatorProfile.id,
+                backupDirectory: backupDirectory.isEmpty ? nil : backupDirectory,
+                lastKnownColumnFamilies: metadata.columnFamilies
+            )
+            recentDatabases.removeAll { $0.path == path }
+            recentDatabases.insert(recent, at: 0)
+            historyStore.save(Array(recentDatabases.prefix(20)))
+            openDatabaseSheetPresented = false
+            updateOperation(operationID, detail: "Opened \(metadata.columnFamilies.count) column families", progress: 1)
+            refreshCurrentScan()
+            return nil
+        } catch {
+            updateOperation(operationID, detail: error.localizedDescription, progress: 1)
+            return error.localizedDescription
         }
     }
 
@@ -318,6 +322,18 @@ final class AppModel: ObservableObject {
     func clearHistory() {
         recentDatabases.removeAll()
         historyStore.clear()
+    }
+
+    private func persistCurrentRecentMetadata() {
+        guard let activeDatabasePath,
+              let index = recentDatabases.firstIndex(where: { $0.path == activeDatabasePath })
+        else { return }
+        recentDatabases[index].backupDirectory = backupDirectory.isEmpty ? nil : backupDirectory
+        recentDatabases[index].selectedColumnFamily = selectedColumnFamily
+        recentDatabases[index].openMode = openMode
+        recentDatabases[index].comparatorProfileID = comparatorProfile.id
+        recentDatabases[index].lastKnownColumnFamilies = columnFamilies
+        historyStore.save(Array(recentDatabases.prefix(20)))
     }
 
     func saveKeyValue(mode: EditSheetMode, keyText: String, valueText: String, encoding: ValueDisplayMode) async -> String? {

@@ -12,6 +12,7 @@ final class HistoryStoreTests: XCTestCase {
             openMode: .readOnly,
             selectedColumnFamily: "default",
             comparatorProfileID: "builtin.bytewise",
+            backupDirectory: "/tmp/backups",
             lastKnownColumnFamilies: ["default"]
         )
 
@@ -21,6 +22,7 @@ final class HistoryStoreTests: XCTestCase {
         let loaded = store.load()
 
         XCTAssertEqual(loaded.first?.path, recent.path)
+        XCTAssertEqual(loaded.first?.backupDirectory, "/tmp/backups")
         XCTAssertEqual(loaded.first?.lastKnownColumnFamilies, ["default"])
     }
 }
